@@ -1,4 +1,4 @@
-package cache
+package minder
 
 import (
 	"time"
