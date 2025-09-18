@@ -48,6 +48,25 @@ func (c *Cache[K, V]) SetWithTTL(k K, v V, ttl time.Duration) bool {
 	return true
 }
 
+func (c *Cache[K, V]) Range(f func(key K, value V) bool) {
+	now := time.Now()
+	c.store.Range(func(k K, item *cacheItem[V]) bool {
+		if !item.expiration.IsZero() && now.After(item.expiration) {
+			c.store.Compute(k, func(oldItem *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
+				if !loaded || oldItem != item {
+					return nil, xsync.CancelOp
+				}
+				if now.After(oldItem.expiration) {
+					return nil, xsync.DeleteOp
+				}
+				return oldItem, xsync.CancelOp
+			})
+			return true
+		}
+		return f(k, item.value)
+	})
+}
+
 func (c *Cache[K, V]) Get(k K) (V, bool) {
 	item, ok := c.store.Load(k)
 	if !ok {

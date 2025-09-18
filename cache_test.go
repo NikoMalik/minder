@@ -8,6 +8,36 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestCacheSetOverwrite(t *testing.T) {
+	cache := NewCache[string, int]()
+
+	ok := cache.Set("key1", 100)
+	if !ok {
+		t.Fatal("Set should return true")
+	}
+
+	val, found := cache.Get("key1")
+	if !found {
+		t.Fatal("Value should be found after Set")
+	}
+	if val != 100 {
+		t.Fatalf("Expected 100, got %d", val)
+	}
+
+	ok = cache.Set("key1", 200)
+	if !ok {
+		t.Fatal("Second Set should return true")
+	}
+
+	val, found = cache.Get("key1")
+	if !found {
+		t.Fatal("Value should be found after overwrite")
+	}
+	if val != 200 {
+		t.Fatalf("Expected 200 after overwrite, got %d", val)
+	}
+}
+
 func TestCacheSetAndGet(t *testing.T) {
 	cache := NewCache[int, string]()
 
