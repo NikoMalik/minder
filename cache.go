@@ -30,6 +30,14 @@ func NewCache[K comparable, V any]() *Cache[K, V] {
 	return c
 }
 
+func (c *Cache[K, V]) Cap() int {
+	return c.store.Stats().Capacity
+}
+
+func (c *Cache[K, V]) Size() int {
+	return c.store.Stats().Size
+}
+
 func (c *Cache[K, V]) Set(k K, v V) bool {
 	item := &cacheItem[V]{
 		value: v,
