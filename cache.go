@@ -1,24 +1,22 @@
 package minder
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 )
 
-const (
-	iter0       = 1 << 3
-	elementNum0 = 1 << 30
-)
-
 type cacheItem[V any] struct {
-	value      V
-	expiration time.Time //zero means no expiration
+	value V
+	// expiration time.Time //zero means no expiration
+	expiration int64
 }
 
 type Cache[K comparable, V any] struct {
 	store       *xsync.Map[K, *cacheItem[V]]
 	stopCleanup chan struct{}
+	validSize   atomic.Int64
 }
 
 func NewCache[K comparable, V any]() *Cache[K, V] {
@@ -35,36 +33,72 @@ func (c *Cache[K, V]) Cap() int {
 }
 
 func (c *Cache[K, V]) Size() int {
-	return c.store.Stats().Size
+	return c.store.Size()
+}
+
+func (c *Cache[K, V]) Len() int {
+	return int(c.validSize.Load())
+}
+
+func (c *Cache[K, V]) ExpiredCount() int {
+	return c.Size() - c.Len()
 }
 
 func (c *Cache[K, V]) Set(k K, v V) bool {
-	item := &cacheItem[V]{
-		value: v,
-		// expiration.IsZero() means "always keep"
+	item := &cacheItem[V]{value: v}
+	var added bool
+	c.store.Compute(k, func(old *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
+		if !loaded {
+			added = true
+		}
+		return item, xsync.UpdateOp
+	})
+
+	if added {
+		c.validSize.Add(1)
 	}
-	c.store.Store(k, item)
 	return true
+}
+
+func (c *Cache[K, V]) SetOrGet(k K, v V) bool {
+	item := &cacheItem[V]{value: v}
+	_, loaded := c.store.LoadOrStore(k, item)
+	if !loaded {
+		c.validSize.Add(1)
+		return true
+	}
+	return false
+
 }
 
 func (c *Cache[K, V]) SetWithTTL(k K, v V, ttl time.Duration) bool {
 	item := &cacheItem[V]{
 		value:      v,
-		expiration: time.Now().Add(ttl),
+		expiration: time.Now().Add(ttl).UnixMilli(),
 	}
-	c.store.Store(k, item)
+	var added bool
+	c.store.Compute(k, func(old *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
+		if !loaded {
+			added = true
+		}
+		return item, xsync.UpdateOp
+	})
+	if added {
+		c.validSize.Add(1)
+	}
 	return true
 }
 
 func (c *Cache[K, V]) Range(f func(key K, value V) bool) {
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	c.store.Range(func(k K, item *cacheItem[V]) bool {
-		if !item.expiration.IsZero() && now.After(item.expiration) {
+		if item.expiration != 0 && now > item.expiration {
 			c.store.Compute(k, func(oldItem *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
 				if !loaded || oldItem != item {
 					return nil, xsync.CancelOp
 				}
-				if now.After(oldItem.expiration) {
+				if now > oldItem.expiration {
+					c.validSize.Add(-1)
 					return nil, xsync.DeleteOp
 				}
 				return oldItem, xsync.CancelOp
@@ -81,15 +115,14 @@ func (c *Cache[K, V]) Get(k K) (V, bool) {
 		var zero V
 		return zero, false
 	}
-
-	// for ttl elements check time
-	if !item.expiration.IsZero() && time.Now().After(item.expiration) {
+	if item.expiration != 0 && time.Now().UnixMilli() > item.expiration {
 		c.store.Compute(k, func(oldItem *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
 			if !loaded || oldItem != item {
-				return nil, xsync.CancelOp // element already done
+				return nil, xsync.CancelOp
 			}
-			if time.Now().After(oldItem.expiration) {
-				return nil, xsync.DeleteOp // delete only if old
+			if time.Now().UnixMilli() > oldItem.expiration {
+				c.validSize.Add(-1)
+				return nil, xsync.DeleteOp
 			}
 			return oldItem, xsync.CancelOp
 		})
@@ -100,11 +133,14 @@ func (c *Cache[K, V]) Get(k K) (V, bool) {
 }
 
 func (c *Cache[K, V]) Del(k K) {
-	c.store.Delete(k)
+	_, loaded := c.store.LoadAndDelete(k)
+	if loaded {
+		c.validSize.Add(-1)
+	}
 }
-
-func (c *Cache[T, V]) Clear() {
+func (c *Cache[K, V]) Clear() {
 	c.store.Clear()
+	c.validSize.Store(0)
 }
 
 func (c *Cache[K, V]) GetTTL(k K) (time.Duration, bool) {
@@ -112,16 +148,24 @@ func (c *Cache[K, V]) GetTTL(k K) (time.Duration, bool) {
 	if !ok {
 		return 0, false
 	}
-
-	if item.expiration.IsZero() {
+	if item.expiration == 0 {
 		return 0, false
 	}
-
-	now := time.Now()
-	if now.After(item.expiration) {
+	now := time.Now().UnixMilli()
+	if now > item.expiration {
+		c.store.Compute(k, func(oldItem *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
+			if !loaded || oldItem != item {
+				return nil, xsync.CancelOp
+			}
+			if now > oldItem.expiration {
+				c.validSize.Add(-1)
+				return nil, xsync.DeleteOp
+			}
+			return oldItem, xsync.CancelOp
+		})
 		return 0, false
 	}
-	return item.expiration.Sub(now), true
+	return time.Duration((item.expiration - now) * int64(time.Millisecond)), true
 }
 
 func (c *Cache[K, V]) cleanupRoutine() {
@@ -137,16 +181,17 @@ func (c *Cache[K, V]) cleanupRoutine() {
 		}
 	}
 }
+
 func (c *Cache[K, V]) cleanup() {
-	now := time.Now()
+	now := time.Now().UnixMilli()
 	c.store.Range(func(k K, item *cacheItem[V]) bool {
-		// delete only ttl with expuired
-		if !item.expiration.IsZero() && now.After(item.expiration) {
+		if item.expiration != 0 && now > item.expiration {
 			c.store.Compute(k, func(oldItem *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
 				if !loaded || oldItem != item {
 					return nil, xsync.CancelOp
 				}
-				if now.After(oldItem.expiration) {
+				if now > oldItem.expiration {
+					c.validSize.Add(-1)
 					return nil, xsync.DeleteOp
 				}
 				return oldItem, xsync.CancelOp

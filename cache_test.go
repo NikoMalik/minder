@@ -50,6 +50,24 @@ func TestCacheSetAndGet(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestCacheValidSize(t *testing.T) {
+	c := NewCache[string, int]()
+	c.Set("key1", 1)
+	c.SetWithTTL("key2", 2, 1*time.Millisecond)
+	if got := c.Len(); got != 2 {
+		t.Errorf("Expected ValidSize 2, got %d", got)
+	}
+	time.Sleep(2 * time.Millisecond)
+	c.Get("key2") // triggers expiration
+	if got := c.Len(); got != 1 {
+		t.Errorf("Expected ValidSize 1 after expiration, got %d", got)
+	}
+	c.Del("key1")
+	if got := c.Len(); got != 0 {
+		t.Errorf("Expected ValidSize 0 after delete, got %d", got)
+	}
+}
+
 func TestCacheDelete(t *testing.T) {
 	cache := NewCache[int, string]()
 
@@ -97,9 +115,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 			wg.Done()
 		}(i)
 	}
-
 	wg.Wait()
-
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func(goroutineID int) {
