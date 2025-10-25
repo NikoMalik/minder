@@ -19,9 +19,16 @@ type Cache[K comparable, V any] struct {
 	validSize   atomic.Int64
 }
 
-func NewCache[K comparable, V any]() *Cache[K, V] {
+// Size optional
+func NewCache[K comparable, V any](size ...int) *Cache[K, V] {
+	var s int
+	if len(size) > 0 {
+		s = size[0]
+	} else {
+		s = 1024_000 //DEFAULT
+	}
 	c := &Cache[K, V]{
-		store:       xsync.NewMap[K, *cacheItem[V]](xsync.WithPresize(1_000_000), xsync.WithGrowOnly()),
+		store:       xsync.NewMap[K, *cacheItem[V]](xsync.WithPresize(s), xsync.WithGrowOnly()),
 		stopCleanup: make(chan struct{}),
 	}
 	go c.cleanupRoutine()
@@ -106,6 +113,26 @@ func (c *Cache[K, V]) Range(f func(key K, value V) bool) {
 			return true
 		}
 		return f(k, item.value)
+	})
+}
+
+func (c *Cache[K, V]) RangeKeys(f func(key K) bool) {
+	now := time.Now().UnixMilli()
+	c.store.Range(func(k K, item *cacheItem[V]) bool {
+		if item.expiration != 0 && now > item.expiration {
+			c.store.Compute(k, func(oldItem *cacheItem[V], loaded bool) (*cacheItem[V], xsync.ComputeOp) {
+				if !loaded || oldItem != item {
+					return nil, xsync.CancelOp
+				}
+				if now > oldItem.expiration {
+					c.validSize.Add(-1)
+					return nil, xsync.DeleteOp
+				}
+				return oldItem, xsync.CancelOp
+			})
+			return true
+		}
+		return f(k)
 	})
 }
 
