@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+type syncMapWrapper struct {
+	m sync.Map
+}
+
+func (s *syncMapWrapper) Set(k string, v int) bool {
+	s.m.Store(k, v)
+	return true
+}
+
+func (s *syncMapWrapper) Get(k string) (int, bool) {
+	v, ok := s.m.Load(k)
+	if !ok {
+		return 0, false
+	}
+	return v.(int), true
+}
+
+func (s *syncMapWrapper) Close() {}
+
 func BenchmarkCacheOperations(b *testing.B) {
 	const totalItems = 100_0000
 	const goroutines = 40
@@ -16,6 +35,7 @@ func BenchmarkCacheOperations(b *testing.B) {
 	}{
 		{"SingleCache", "single"},
 		{"ShardedCache", "sharded"},
+		{"SyncMap", "syncMap"},
 	}
 
 	for _, bc := range benchCases {
@@ -25,10 +45,14 @@ func BenchmarkCacheOperations(b *testing.B) {
 				Get(k string) (int, bool)
 				Close()
 			}
-			if bc.cacheType == "single" {
+
+			switch bc.cacheType {
+			case "single":
 				cache = NewCache[string, int]()
-			} else {
+			case "sharded":
 				cache = NewShardedCache[string, int]()
+			case "syncMap":
+				cache = &syncMapWrapper{}
 			}
 			defer cache.Close()
 

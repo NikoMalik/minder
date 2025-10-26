@@ -2,6 +2,7 @@ package minder
 
 import (
 	"hash/maphash"
+	"math/bits"
 	"sync/atomic"
 	"time"
 
@@ -33,8 +34,13 @@ func NewShardedCache[K comparable, V any]() *ShardedCache[K, V] {
 	return sc
 }
 
+func fastRange(h uint64) uint64 {
+	h64, _ := bits.Mul64(h, SHARD_COUNT)
+	return h64
+}
+
 func (sc *ShardedCache[K, V]) mask(h uint64) uint64 {
-	return h & SHARD_MASK
+	return fastRange(h >> 32)
 }
 
 func (sc *ShardedCache[K, V]) getShard(k K) *Cache[K, V] {
