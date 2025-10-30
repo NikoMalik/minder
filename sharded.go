@@ -60,6 +60,10 @@ func (sc *ShardedCache[K, V]) Get(k K) (V, bool) {
 	return sc.getShard(k).Get(k)
 }
 
+func (sc *ShardedCache[K, V]) GetTTL(k K) (time.Duration, bool) {
+	return sc.getShard(k).GetTTL(k)
+}
+
 func (sc *ShardedCache[K, V]) Del(k K) {
 	sc.getShard(k).Del(k)
 }
