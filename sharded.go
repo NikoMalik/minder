@@ -3,7 +3,6 @@ package minder
 import (
 	"hash/maphash"
 	"math/bits"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -17,7 +16,6 @@ const TOTAL = 1024_000
 type ShardedCache[K comparable, V any] struct {
 	shards      [SHARD_COUNT]*Cache[K, V]
 	hashSeed    maphash.Seed
-	validSize   atomic.Int64
 	stopCleanup chan struct{}
 }
 
@@ -99,7 +97,6 @@ func (sc *ShardedCache[K, V]) Clear() {
 		})
 	}
 	_ = eg.Wait()
-	sc.validSize.Store(0)
 }
 
 func (sc *ShardedCache[K, V]) cleanupRoutine() {
