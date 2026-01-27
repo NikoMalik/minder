@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const SHARD_COUNT = 512
+const SHARD_COUNT = 1024
 const SHARD_MASK = SHARD_COUNT - 1
 
 const TOTAL = 1024_000
@@ -38,7 +38,7 @@ func fastRange(h uint64) uint64 {
 }
 
 func (sc *ShardedCache[K, V]) mask(h uint64) uint64 {
-	return fastRange(h >> 32)
+	return h & SHARD_MASK
 }
 
 func (sc *ShardedCache[K, V]) getShard(k K) *Cache[K, V] {
@@ -66,8 +66,29 @@ func (sc *ShardedCache[K, V]) Del(k K) {
 	sc.getShard(k).Del(k)
 }
 
-// NOTE: scope in range not thread safe,use locks to change value when use Range()
+// Range iterates over all items sequentially.
+// The callback is called from a single goroutine, so no external synchronization needed.
+// Return false from callback to stop iteration.
 func (sc *ShardedCache[K, V]) Range(f func(key K, value V) bool) {
+	for i := 0; i < SHARD_COUNT; i++ {
+		stop := false
+		sc.shards[i].Range(func(k K, v V) bool {
+			if !f(k, v) {
+				stop = true
+				return false
+			}
+			return true
+		})
+		if stop {
+			return
+		}
+	}
+}
+
+// RangeParallel iterates over all items in parallel across shards.
+// WARNING: The callback may be called from multiple goroutines simultaneously.
+// Ensure your callback is thread-safe or use Range() for sequential iteration.
+func (sc *ShardedCache[K, V]) RangeParallel(f func(key K, value V) bool) {
 	var eg errgroup.Group
 	for i := 0; i < SHARD_COUNT; i++ {
 		shard := sc.shards[i]

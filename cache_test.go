@@ -58,11 +58,11 @@ func TestCacheValidSize(t *testing.T) {
 	t.Parallel()
 	c := NewCache[string, int]()
 	c.Set("key1", 1)
-	c.SetWithTTL("key2", 2, 1*time.Millisecond)
+	c.SetWithTTL("key2", 2, 50*time.Millisecond)
 	if got := c.Len(); got != 2 {
 		t.Errorf("Expected ValidSize 2, got %d", got)
 	}
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	c.Get("key2") // triggers expiration
 	if got := c.Len(); got != 1 {
 		t.Errorf("Expected ValidSize 1 after expiration, got %d", got)
@@ -328,10 +328,10 @@ func TestCacheTTLUpdate(t *testing.T) {
 
 	cache := NewCache[int, string]()
 
-	cache.SetWithTTL(1, "test", 150*time.Millisecond)
-	cache.SetWithTTL(1, "updated", 200*time.Millisecond)
+	cache.SetWithTTL(1, "test", 500*time.Millisecond)
+	cache.SetWithTTL(1, "updated", 2*time.Second)
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 	val, found := cache.Get(1)
 	assert.True(t, found)
 	assert.Equal(t, "updated", val)
@@ -476,4 +476,476 @@ func TestShardedCacheRange(t *testing.T) {
 	if cache.Len() != 100 {
 		t.Errorf("Expected Len=100, got %d", cache.Len())
 	}
+}
+
+// ShardedLFUCache tests
+
+func TestShardedLFUCacheBasic(t *testing.T) {
+	t.Parallel()
+
+	cache := NewShardedLFUCache[string, int]()
+	defer cache.Close()
+
+	cache.Set("key1", 42)
+	if val, ok := cache.Get("key1"); !ok || val != 42 {
+		t.Errorf("Expected key1=42, got ok=%v, val=%v", ok, val)
+	}
+
+	cache.Del("key1")
+	if _, ok := cache.Get("key1"); ok {
+		t.Errorf("Expected key1 to be deleted")
+	}
+}
+
+func TestShardedLFUCacheWithTTL(t *testing.T) {
+	t.Parallel()
+
+	cache := NewShardedLFUCache[string, int]()
+	defer cache.Close()
+
+	cache.SetWithTTL("key1", 100, 50*time.Millisecond)
+	if val, ok := cache.Get("key1"); !ok || val != 100 {
+		t.Errorf("Expected key1=100, got ok=%v, val=%v", ok, val)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if _, ok := cache.Get("key1"); ok {
+		t.Errorf("Expected key1 to be expired")
+	}
+}
+
+func TestShardedLFUCacheEviction(t *testing.T) {
+	t.Parallel()
+
+	// Create a small cache with limited capacity per shard.
+	cache := NewShardedLFUCacheWithSize[string, int](512) // 1 per shard
+	defer cache.Close()
+
+	// Add many items to trigger eviction.
+	for i := 0; i < 1000; i++ {
+		cache.Set(fmt.Sprintf("key%d", i), i)
+	}
+
+	// With eviction, Len should be bounded by MaxCost.
+	maxCost := cache.MaxCost()
+	if int64(cache.Len()) > maxCost {
+		t.Errorf("Expected Len <= %d (maxCost), got %d", maxCost, cache.Len())
+	}
+}
+
+func TestShardedLFUCacheConcurrency(t *testing.T) {
+	cache := NewShardedLFUCache[string, int]()
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 100
+	const itemsPerGoroutine = 100
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < itemsPerGoroutine; i++ {
+				key := fmt.Sprintf("key%d-%d", gid, i)
+				cache.Set(key, i)
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Read back values.
+	var readCount atomic.Int32
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < itemsPerGoroutine; i++ {
+				key := fmt.Sprintf("key%d-%d", gid, i)
+				if val, ok := cache.Get(key); ok && val == i {
+					readCount.Add(1)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// With default capacity of 1024000 and 10000 items, all should be stored.
+	// Allow some margin for hash collisions and timing.
+	if readCount.Load() < 9000 {
+		t.Errorf("Expected at least 9000 successful reads, got %d", readCount.Load())
+	}
+}
+
+func TestShardedLFUCacheFrequencyBased(t *testing.T) {
+	t.Parallel()
+
+	// Create a cache large enough to hold initial items but will require eviction.
+	cache := NewShardedLFUCacheWithSize[int, string](5120) // 10 per shard
+	defer cache.Close()
+
+	// Add "hot" items and access them frequently.
+	for i := 0; i < 100; i++ {
+		cache.Set(i, fmt.Sprintf("hot%d", i))
+	}
+
+	// Access hot items multiple times to increase their frequency.
+	for j := 0; j < 20; j++ {
+		for i := 0; i < 100; i++ {
+			cache.Get(i)
+		}
+	}
+
+	// Flush access buffers to ensure frequency is recorded before adding cold items.
+	cache.FlushAccessBuffers()
+
+	// Now add "cold" items which should compete with hot items.
+	for i := 100; i < 10000; i++ {
+		cache.Set(i, fmt.Sprintf("cold%d", i))
+	}
+
+	// Hot items should still be present due to their higher frequency.
+	hotFound := 0
+	for i := 0; i < 100; i++ {
+		if _, ok := cache.Get(i); ok {
+			hotFound++
+		}
+	}
+
+	// We expect most hot items to survive eviction.
+	if hotFound < 30 {
+		t.Errorf("Expected at least 30 hot items to survive, got %d", hotFound)
+	}
+}
+
+func TestShardedLFUCacheRange(t *testing.T) {
+	cache := NewShardedLFUCache[string, int]()
+	defer cache.Close()
+
+	for i := 0; i < 100; i++ {
+		cache.Set(fmt.Sprintf("key%d", i), i)
+	}
+
+	var count int64 = 0
+	cache.Range(func(key string, value int) bool {
+		atomic.AddInt64(&count, 1)
+		return true
+	})
+
+	if count != 100 {
+		t.Errorf("Expected Range to iterate over 100 items, got %d", count)
+	}
+}
+
+func TestShardedLFUCacheClear(t *testing.T) {
+	t.Parallel()
+
+	cache := NewShardedLFUCache[string, int]()
+	defer cache.Close()
+
+	for i := 0; i < 100; i++ {
+		cache.Set(fmt.Sprintf("key%d", i), i)
+	}
+
+	cache.Clear()
+
+	if cache.Len() != 0 {
+		t.Errorf("Expected Len=0 after Clear, got %d", cache.Len())
+	}
+
+	if _, ok := cache.Get("key0"); ok {
+		t.Errorf("Expected key0 to be cleared")
+	}
+}
+
+// Race condition tests
+
+func TestShardedLFUCacheRaceSetGet(t *testing.T) {
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 100
+	const iterations = 1000
+
+	// Concurrent writes
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Set(i%100, id*iterations+i)
+			}
+		}(g)
+	}
+
+	// Concurrent reads
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Get(i % 100)
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestShardedLFUCacheRaceSetDelete(t *testing.T) {
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 50
+	const iterations = 1000
+
+	// Concurrent writes
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Set(i%50, id)
+			}
+		}(g)
+	}
+
+	// Concurrent deletes
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Del(i % 50)
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestShardedLFUCacheRaceSetClear(t *testing.T) {
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 20
+	const iterations = 500
+
+	// Concurrent writes
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Set(id*iterations+i, i)
+			}
+		}(g)
+	}
+
+	// Concurrent clears
+	for g := 0; g < 5; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				cache.Clear()
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+func TestShardedLFUCacheRaceEviction(t *testing.T) {
+	// Small cache to force eviction
+	cache := NewShardedLFUCacheWithSize[int, int](1024)
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 100
+	const iterations = 1000
+
+	// Concurrent writes causing eviction
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Set(id*iterations+i, i)
+			}
+		}(g)
+	}
+
+	// Concurrent reads updating frequency
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Get(id*iterations + i)
+			}
+		}(g)
+	}
+
+	wg.Wait()
+}
+
+func TestShardedLFUCacheRaceRange(t *testing.T) {
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 20
+
+	// Concurrent writes
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				cache.Set(id*100+i, i)
+			}
+		}(g)
+	}
+
+	// Concurrent ranges
+	for g := 0; g < 10; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				cache.Range(func(k, v int) bool {
+					return true
+				})
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// TestShardedCacheRangeNoExternalLock verifies that sequential Range
+// can safely modify external state without locks (no race condition)
+func TestShardedCacheRangeNoExternalLock(t *testing.T) {
+	t.Parallel()
+	cache := NewShardedCache[int, int]()
+	defer cache.Close()
+
+	// Add data
+	for i := 0; i < 1000; i++ {
+		cache.Set(i, i*10)
+	}
+
+	// Sequential Range - should be safe to modify map without locks
+	results := make(map[int]int)
+	cache.Range(func(k, v int) bool {
+		results[k] = v // No race because Range is sequential
+		return true
+	})
+
+	if len(results) != 1000 {
+		t.Errorf("Expected 1000 results, got %d", len(results))
+	}
+}
+
+// TestShardedLFUCacheRangeNoExternalLock verifies sequential Range safety
+func TestShardedLFUCacheRangeNoExternalLock(t *testing.T) {
+	t.Parallel()
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	// Add data
+	for i := 0; i < 1000; i++ {
+		cache.Set(i, i*10)
+	}
+
+	// Sequential Range - should be safe to modify slice without locks
+	var results []int
+	cache.Range(func(k, v int) bool {
+		results = append(results, v) // No race because Range is sequential
+		return true
+	})
+
+	if len(results) != 1000 {
+		t.Errorf("Expected 1000 results, got %d", len(results))
+	}
+}
+
+func TestShardedCacheRangeParallelWithLock(t *testing.T) {
+	t.Parallel()
+	cache := NewShardedCache[int, int]()
+	defer cache.Close()
+
+	for i := 0; i < 1000; i++ {
+		cache.Set(i, i*10)
+	}
+
+	// RangeParallel requires external synchronization
+	var mu sync.Mutex
+	var count int64
+	cache.RangeParallel(func(k, v int) bool {
+		mu.Lock()
+		count++
+		mu.Unlock()
+		return true
+	})
+
+	if count != 1000 {
+		t.Errorf("Expected 1000 count, got %d", count)
+	}
+}
+
+func TestShardedLFUCacheRangeParallelWithAtomic(t *testing.T) {
+	t.Parallel()
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	for i := 0; i < 1000; i++ {
+		cache.Set(i, i*10)
+	}
+
+	// RangeParallel with atomic counter - safe
+	var count atomic.Int64
+	cache.RangeParallel(func(k, v int) bool {
+		count.Add(1)
+		return true
+	})
+
+	if count.Load() != 1000 {
+		t.Errorf("Expected 1000 count, got %d", count.Load())
+	}
+}
+
+func TestShardedLFUCacheRaceTTL(t *testing.T) {
+	cache := NewShardedLFUCache[int, int]()
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	const goroutines = 50
+	const iterations = 500
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.SetWithTTL(i%100, id, time.Millisecond*time.Duration(i%10+1))
+			}
+		}(g)
+	}
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				cache.Get(i % 100)
+				cache.GetTTL(i % 100)
+			}
+		}()
+	}
+
+	wg.Wait()
 }
