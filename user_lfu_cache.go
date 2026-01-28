@@ -188,6 +188,14 @@ type UserLFUCache[U comparable, K comparable, V any] struct {
 	stopCleanup  chan struct{}
 }
 
+// Flush forces processing of all buffered LFU access updates.
+// Intended for testing only.
+func (c *UserLFUCache[U, K, V]) Flush() {
+	for _, shard := range c.shards {
+		shard.policy.FlushAccessBuffer()
+	}
+}
+
 // GetByKey retrieves a record by key only (without knowing userID).
 // Uses globalKeyIdx for O(1) shard lookup.
 func (c *UserLFUCache[U, K, V]) GetByKey(k K) (V, bool) {
