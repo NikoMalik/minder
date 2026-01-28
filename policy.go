@@ -98,10 +98,6 @@ func (p *lfuPolicy[K, V]) Add(key uint64, originalKey K, cost int64) ([]*evicted
 			return victims, false, false
 		}
 
-		if incHits == 0 && minHits == 0 {
-			return victims, false, false // reject
-		}
-
 		p.evict.del(minKey)
 		sample[minId] = sample[len(sample)-1]
 		sample = sample[:len(sample)-1]
