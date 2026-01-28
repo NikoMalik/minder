@@ -98,6 +98,10 @@ func (p *lfuPolicy[K, V]) Add(key uint64, originalKey K, cost int64) ([]*evicted
 			return victims, false, false
 		}
 
+		if incHits == 0 && minHits == 0 {
+			return victims, false, false // reject
+		}
+
 		p.evict.del(minKey)
 		sample[minId] = sample[len(sample)-1]
 		sample = sample[:len(sample)-1]
@@ -312,11 +316,11 @@ func (p *sampledLFU[K, V]) clear() {
 // tiny (4-bit) counters in the form of a count-min sketch.
 // Uses atomic operations for lock-free concurrent access on hot path.
 type tinyLFU struct {
-	freq       *cmSketch
-	door       *doorkeeper
-	incrs      atomic.Int64
-	resetAt    int64
-	resetting  atomic.Bool // prevents concurrent reset
+	freq      *cmSketch
+	door      *doorkeeper
+	incrs     atomic.Int64
+	resetAt   int64
+	resetting atomic.Bool // prevents concurrent reset
 }
 
 func newTinyLFU(numCounters int64) *tinyLFU {
