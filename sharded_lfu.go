@@ -284,8 +284,8 @@ func (sc *ShardedLFUCache[K, V]) RangeParallel(f func(key K, value V) bool) {
 func (s *lfuShard[K, V]) rangeItems(f func(key K, value V) bool) {
 	now := time.Now().UnixMilli()
 	s.store.Range(func(k K, item *lfuCacheItem[V]) bool {
+		hash := maphash.Comparable(s.hashSeed, k)
 		if item.expiration != 0 && now > item.expiration {
-			hash := maphash.Comparable(s.hashSeed, k)
 			s.store.Compute(k, func(oldItem *lfuCacheItem[V], loaded bool) (*lfuCacheItem[V], xsync.ComputeOp) {
 				if !loaded || oldItem != item {
 					return nil, xsync.CancelOp
@@ -299,6 +299,8 @@ func (s *lfuShard[K, V]) rangeItems(f func(key K, value V) bool) {
 			})
 			return true
 		}
+		// Record access for frequency tracking
+		s.policy.RecordAccess(hash)
 		return f(k, item.value)
 	})
 }

@@ -741,11 +741,15 @@ func (c *UserLFUCache[U, K, V]) Config() UserLFUCacheConfig {
 // Range iterates over all records in the cache.
 // The callback receives userID, key, value for each record.
 // Return false from the callback to stop iteration.
+// Each accessed item has its frequency incremented.
 func (c *UserLFUCache[U, K, V]) Range(f func(userID U, key K, value V) bool) {
 	for _, shard := range c.shards {
 		stop := false
 		shard.users.Range(func(userID U, records *userRecordSet[K, V]) bool {
 			for _, item := range records.getAll() {
+				// Record access for frequency tracking
+				keyHash := c.keyHash(item.key)
+				shard.policy.IncrementAccess(keyHash)
 				if !f(userID, item.key, item.value) {
 					stop = true
 					return false
@@ -762,11 +766,15 @@ func (c *UserLFUCache[U, K, V]) Range(f func(userID U, key K, value V) bool) {
 // RangeRecords iterates over all records with full metadata.
 // The callback receives userID and UserRecord for each record.
 // Return false from the callback to stop iteration.
+// Each accessed item has its frequency incremented.
 func (c *UserLFUCache[U, K, V]) RangeRecords(f func(userID U, record UserRecord[K, V]) bool) {
 	for _, shard := range c.shards {
 		stop := false
 		shard.users.Range(func(userID U, records *userRecordSet[K, V]) bool {
 			for _, item := range records.getAll() {
+				// Record access for frequency tracking
+				keyHash := c.keyHash(item.key)
+				shard.policy.IncrementAccess(keyHash)
 				rec := UserRecord[K, V]{
 					Key:       item.key,
 					Value:     item.value,
@@ -807,6 +815,7 @@ func (c *UserLFUCache[U, K, V]) RangeUsers(f func(userID U, recordCount int) boo
 
 // RangeByUser iterates over all records for a specific user.
 // Return false from the callback to stop iteration.
+// Each accessed item has its frequency incremented.
 func (c *UserLFUCache[U, K, V]) RangeByUser(userID U, f func(key K, value V) bool) {
 	shard := c.getShard(userID)
 	records, ok := shard.users.Load(userID)
@@ -814,6 +823,9 @@ func (c *UserLFUCache[U, K, V]) RangeByUser(userID U, f func(key K, value V) boo
 		return
 	}
 	for _, item := range records.getAll() {
+		// Record access for frequency tracking
+		keyHash := c.keyHash(item.key)
+		shard.policy.IncrementAccess(keyHash)
 		if !f(item.key, item.value) {
 			return
 		}
