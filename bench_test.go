@@ -119,22 +119,21 @@ func BenchmarkCacheOperations(b *testing.B) {
 	}
 }
 
-// BenchmarkUserLFUCache benchmarks UserLFUCache operations
-func BenchmarkUserLFUCache(b *testing.B) {
+// BenchmarkUserCache benchmarks UserCache operations
+func BenchmarkUserCache(b *testing.B) {
 	const goroutines = 40
 	const usersCount = 100
 	const recordsPerUser = 100
 
-	config := UserLFUCacheConfig{
+	config := UserCacheConfig{
 		DefaultCachedCount: 50,
-		TotalCapacity:      1_000_000,
 		ShardCount:         256,
 		SweepInterval:      time.Hour,
 		CacheAgeDays:       30,
 	}
 
 	b.Run("Set", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -155,7 +154,7 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 
 	b.Run("Get", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -183,7 +182,7 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 
 	b.Run("GetByKey", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -211,7 +210,7 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 
 	b.Run("Mixed", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -247,7 +246,7 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 
 	b.Run("GetNewest", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -274,7 +273,7 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 
 	b.Run("Range", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -296,7 +295,7 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 
 	b.Run("Len", func(b *testing.B) {
-		cache := NewUserLFUCache[int, string, int](config)
+		cache := NewUserCache[int, string, int](config)
 		defer cache.Close()
 		now := time.Now()
 
@@ -322,20 +321,19 @@ func BenchmarkUserLFUCache(b *testing.B) {
 	})
 }
 
-// BenchmarkUserLFUCacheHighContention tests performance under high contention
-func BenchmarkUserLFUCacheHighContention(b *testing.B) {
+// BenchmarkUserCacheHighContention tests performance under high contention
+func BenchmarkUserCacheHighContention(b *testing.B) {
 	const goroutines = 100
-	const hotUsers = 10 // Only 10 users - high contention
+	const hotUsers = 10
 
-	config := UserLFUCacheConfig{
+	config := UserCacheConfig{
 		DefaultCachedCount: 100,
-		TotalCapacity:      100_000,
 		ShardCount:         256,
 		SweepInterval:      time.Hour,
 		CacheAgeDays:       30,
 	}
 
-	cache := NewUserLFUCache[int, string, int](config)
+	cache := NewUserCache[int, string, int](config)
 	defer cache.Close()
 	now := time.Now()
 
@@ -353,7 +351,7 @@ func BenchmarkUserLFUCacheHighContention(b *testing.B) {
 		go func(gid int) {
 			defer wg.Done()
 			for i := 0; i < b.N/goroutines; i++ {
-				userID := i % hotUsers // All goroutines hit same users
+				userID := i % hotUsers
 				switch i % 3 {
 				case 0:
 					cache.Set(userID, fmt.Sprintf("hot-tx%d-%d", gid, i), i, now)
@@ -368,19 +366,18 @@ func BenchmarkUserLFUCacheHighContention(b *testing.B) {
 	wg.Wait()
 }
 
-// BenchmarkUserLFUCacheEviction tests performance with eviction pressure
-func BenchmarkUserLFUCacheEviction(b *testing.B) {
+// BenchmarkUserCacheInsertHeavy tests performance with heavy insert load
+func BenchmarkUserCacheInsertHeavy(b *testing.B) {
 	const goroutines = 40
 
-	config := UserLFUCacheConfig{
+	config := UserCacheConfig{
 		DefaultCachedCount: 10,
-		TotalCapacity:      1000, // Small capacity to trigger evictions
 		ShardCount:         64,
 		SweepInterval:      time.Hour,
 		CacheAgeDays:       30,
 	}
 
-	cache := NewUserLFUCache[int, string, int](config)
+	cache := NewUserCache[int, string, int](config)
 	defer cache.Close()
 	now := time.Now()
 
@@ -394,7 +391,6 @@ func BenchmarkUserLFUCacheEviction(b *testing.B) {
 				userID := gid
 				key := fmt.Sprintf("tx%d-%d", gid, i)
 				cache.Set(userID, key, i, now)
-				// Immediately try to read - may or may not be evicted
 				cache.Get(userID, key)
 			}
 		}(g)

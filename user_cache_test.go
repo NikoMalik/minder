@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-func TestUserLFUCacheBasic(t *testing.T) {
-	config := DefaultUserLFUConfig()
+func TestUserCacheBasic(t *testing.T) {
+	config := DefaultUserCacheConfig()
 	config.DefaultCachedCount = 10
-	cache := NewUserLFUCache[string, string, int](config)
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user1"
@@ -42,10 +42,10 @@ func TestUserLFUCacheBasic(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheGetNewest(t *testing.T) {
-	config := DefaultUserLFUConfig()
+func TestUserCacheGetNewest(t *testing.T) {
+	config := DefaultUserCacheConfig()
 	config.DefaultCachedCount = 100
-	cache := NewUserLFUCache[string, string, int](config)
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user1"
@@ -53,7 +53,6 @@ func TestUserLFUCacheGetNewest(t *testing.T) {
 
 	// Add 20 records with different creation times
 	for i := 0; i < 20; i++ {
-		// Older transactions have higher indices
 		createdAt := baseTime.Add(-time.Duration(i) * time.Hour)
 		cache.Set(userID, fmt.Sprintf("tx%d", i), i, createdAt)
 	}
@@ -65,9 +64,6 @@ func TestUserLFUCacheGetNewest(t *testing.T) {
 	}
 
 	// Should be sorted by createdAt descending (newest first)
-	// tx0 is newest (createdAt = baseTime)
-	// tx1 is second (createdAt = baseTime - 1h)
-	// etc.
 	for i, rec := range records {
 		expectedKey := fmt.Sprintf("tx%d", i)
 		if rec.Key != expectedKey {
@@ -79,9 +75,9 @@ func TestUserLFUCacheGetNewest(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheGetAllSorted(t *testing.T) {
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+func TestUserCacheGetAllSorted(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user1"
@@ -108,15 +104,37 @@ func TestUserLFUCacheGetAllSorted(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheLoadUserRecords(t *testing.T) {
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+func TestUserCacheSetAlwaysAccepts(t *testing.T) {
+	config := UserCacheConfig{
+		DefaultCachedCount: 5,
+		SweepInterval:      time.Hour,
+		CacheAgeDays:       30,
+		ShardCount:         4,
+	}
+	cache := NewUserCache[string, string, int](config)
+	defer cache.Close()
+
+	userID := "user1"
+	now := time.Now()
+
+	// Add many records — all should be accepted (no admission control)
+	for i := 0; i < 200; i++ {
+		cache.Set(userID, fmt.Sprintf("tx%d", i), i, now.Add(-time.Duration(i)*time.Minute))
+	}
+
+	if count := cache.GetUserRecordCount(userID); count != 200 {
+		t.Errorf("Expected 200 records (all accepted), got %d", count)
+	}
+}
+
+func TestUserCacheLoadUserRecords(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user1"
 	baseTime := time.Now()
 
-	// Simulate loading from DB
 	items := make([]struct {
 		Key       string
 		Value     int
@@ -157,9 +175,9 @@ func TestUserLFUCacheLoadUserRecords(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheReplaceUserRecords(t *testing.T) {
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+func TestUserCacheReplaceUserRecords(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user1"
@@ -206,28 +224,25 @@ func TestUserLFUCacheReplaceUserRecords(t *testing.T) {
 		t.Errorf("Expected 10 records, got %d", count)
 	}
 
-	// Should be marked as expanded
-	if !cache.IsUserExpanded(userID) {
-		t.Error("User should be marked as expanded")
+	// Should be marked as fully loaded
+	if !cache.IsFullyLoaded(userID) {
+		t.Error("User should be marked as fully loaded after ReplaceUserRecords")
 	}
 }
 
-func TestUserLFUCacheSweep(t *testing.T) {
-	config := UserLFUCacheConfig{
+func TestUserCacheSweep(t *testing.T) {
+	config := UserCacheConfig{
 		DefaultCachedCount: 5,
-		SweepInterval:      time.Hour, // Won't trigger automatically
-		CacheAgeDays:       1,         // 1 day
-		TotalCapacity:      100000,
+		SweepInterval:      time.Hour,
+		CacheAgeDays:       1,
 		ShardCount:         16,
 	}
-	cache := NewUserLFUCache[string, string, int](config)
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user1"
 	now := time.Now()
 
-	// We need to manually set old cached times to test sweep
-	// For this test, we'll just verify the mechanism works
 	shard := cache.getShard(userID)
 	records, _ := shard.users.LoadOrCompute(userID, func() (*userRecordSet[string, int], bool) {
 		return newUserRecordSet[string, int](), false
@@ -239,24 +254,22 @@ func TestUserLFUCacheSweep(t *testing.T) {
 			key:       fmt.Sprintf("tx%d", i),
 			value:     i,
 			createdAt: now.Add(-time.Duration(i) * time.Hour).UnixMilli(),
-			cached:    now.Add(-48 * time.Hour).UnixMilli(), // 2 days ago (older than CacheAgeDays)
+			cached:    now.Add(-48 * time.Hour).UnixMilli(), // 2 days ago
 			cost:      1,
+			seq:       itemSeq.Add(1),
 		}
 		records.insert(item)
-
-		keyHash := cache.keyHash(item.key)
-		shard.policy.Add(keyHash, item.key, 1)
+		shard.keyIndex.Store(item.key, userID)
+		shard.globalKeyIdx.Store(item.key, globalKeyEntry{shardIdx: shard.shardIdx})
+		shard.validSize.Add(1)
 	}
 
 	if count := cache.GetUserRecordCount(userID); count != 10 {
 		t.Errorf("Expected 10 records before sweep, got %d", count)
 	}
 
-	// Force sweep
 	cache.ForceSweep()
 
-	// Records beyond DefaultCachedCount (5) with cached time older than 1 day should be removed
-	// So records tx5-tx9 should be removed (oldest by createdAt)
 	count := cache.GetUserRecordCount(userID)
 	if count != 5 {
 		t.Errorf("Expected 5 records after sweep, got %d", count)
@@ -270,14 +283,13 @@ func TestUserLFUCacheSweep(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheMultipleUsers(t *testing.T) {
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[int, string, string](config)
+func TestUserCacheMultipleUsers(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[int, string, string](config)
 	defer cache.Close()
 
 	baseTime := time.Now()
 
-	// Add records for multiple users
 	for userID := 1; userID <= 10; userID++ {
 		for i := 0; i < 20; i++ {
 			key := fmt.Sprintf("user%d-tx%d", userID, i)
@@ -286,17 +298,14 @@ func TestUserLFUCacheMultipleUsers(t *testing.T) {
 		}
 	}
 
-	// Check user count
 	if userCount := cache.UserCount(); userCount != 10 {
 		t.Errorf("Expected 10 users, got %d", userCount)
 	}
 
-	// Check total records
 	if total := cache.Len(); total != 200 {
 		t.Errorf("Expected 200 total records, got %d", total)
 	}
 
-	// Delete one user
 	cache.DelUser(5)
 
 	if userCount := cache.UserCount(); userCount != 9 {
@@ -308,10 +317,9 @@ func TestUserLFUCacheMultipleUsers(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheConcurrent(t *testing.T) {
-	config := DefaultUserLFUConfig()
-	config.TotalCapacity = 100000
-	cache := NewUserLFUCache[int, string, int](config)
+func TestUserCacheConcurrent(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[int, string, int](config)
 	defer cache.Close()
 
 	var wg sync.WaitGroup
@@ -345,26 +353,22 @@ func TestUserLFUCacheConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Verify
 	if userCount := cache.UserCount(); userCount != users {
 		t.Errorf("Expected %d users, got %d", users, userCount)
 	}
 }
 
-func TestUserLFUCacheRaceConcurrent(t *testing.T) {
-	config := DefaultUserLFUConfig()
-	config.TotalCapacity = 10000 // Small to trigger eviction
-	cache := NewUserLFUCache[int, string, int](config)
+func TestUserCacheRaceConcurrent(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[int, string, int](config)
 	defer cache.Close()
 
 	var wg sync.WaitGroup
 	baseTime := time.Now()
 
-	// Concurrent writes, reads, deletes
 	for i := 0; i < 100; i++ {
 		wg.Add(3)
 
-		// Writer
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
@@ -373,7 +377,6 @@ func TestUserLFUCacheRaceConcurrent(t *testing.T) {
 			}
 		}(i)
 
-		// Reader
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
@@ -382,7 +385,6 @@ func TestUserLFUCacheRaceConcurrent(t *testing.T) {
 			}
 		}(i)
 
-		// Deleter
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
@@ -395,54 +397,11 @@ func TestUserLFUCacheRaceConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-func TestUserLFUCacheLFUEviction(t *testing.T) {
-	config := UserLFUCacheConfig{
-		DefaultCachedCount: 1000,
-		SweepInterval:      time.Hour,
-		CacheAgeDays:       30,
-		TotalCapacity:      100, // Very small to force LFU eviction
-		ShardCount:         16,
-	}
-	cache := NewUserLFUCache[string, string, int](config)
-	defer cache.Close()
-
-	userID := "user1"
-	baseTime := time.Now()
-
-	// Add hot items and access them frequently
-	for i := 0; i < 20; i++ {
-		cache.Set(userID, fmt.Sprintf("hot%d", i), i, baseTime.Add(-time.Duration(i)*time.Hour))
-	}
-
-	// Access hot items many times
-	for j := 0; j < 50; j++ {
-		for i := 0; i < 20; i++ {
-			cache.Get(userID, fmt.Sprintf("hot%d", i))
-		}
-	}
-
-	// Add cold items - some hot items may be evicted but should survive better
-	for i := 0; i < 200; i++ {
-		cache.Set(userID, fmt.Sprintf("cold%d", i), i+1000, baseTime.Add(-time.Duration(i)*time.Minute))
-	}
-
-	// Check how many hot items survived
-	hotSurvived := 0
-	for i := 0; i < 20; i++ {
-		if _, ok := cache.Get(userID, fmt.Sprintf("hot%d", i)); ok {
-			hotSurvived++
-		}
-	}
-
-	// Some hot items should survive due to higher frequency
-	t.Logf("Hot items survived: %d/20", hotSurvived)
-}
-
-func TestUserLFUCacheGetByKeyBasic(t *testing.T) {
+func TestUserCacheGetByKeyBasic(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
+	config := DefaultUserCacheConfig()
 	config.DefaultCachedCount = 10
-	cache := NewUserLFUCache[string, string, int](config)
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user123"
@@ -464,47 +423,16 @@ func TestUserLFUCacheGetByKeyBasic(t *testing.T) {
 		}
 	}
 
-	// Проверяем несуществующий ключ
 	val, ok := cache.GetByKey("non-existent")
 	if ok {
 		t.Errorf("GetByKey(non-existent) should not find anything, got %d", val)
 	}
 }
 
-func TestUserLFUCacheGetByKeyEviction(t *testing.T) {
+func TestUserCacheGetByKeyAfterDel(t *testing.T) {
 	t.Parallel()
-	config := UserLFUCacheConfig{
-		DefaultCachedCount: 5,
-		TotalCapacity:      10,
-		ShardCount:         4,
-		SweepInterval:      10 * time.Second,
-		CacheAgeDays:       3,
-	}
-	cache := NewUserLFUCache[string, string, int](config)
-	defer cache.Close()
-
-	userID := "user456"
-
-	// Add initial item
-	cache.Set(userID, "tx-evictable", 999, time.Now())
-
-	// Verify it exists
-	val, ok := cache.GetByKey("tx-evictable")
-	if !ok || val != 999 {
-		t.Errorf("Immediate GetByKey failed: ok=%v, val=%v", ok, val)
-	}
-
-	// Add many more items to cause eviction
-	for i := 0; i < 50; i++ {
-		cache.Set(userID, fmt.Sprintf("tx-filler-%d", i), i, time.Now())
-	}
-
-}
-
-func TestUserLFUCacheGetByKeyAfterDel(t *testing.T) {
-	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user789"
@@ -512,71 +440,23 @@ func TestUserLFUCacheGetByKeyAfterDel(t *testing.T) {
 
 	cache.Set(userID, txID, 777, time.Now())
 
-	// Verify exists before delete
 	val, ok := cache.GetByKey(txID)
 	if !ok || val != 777 {
 		t.Errorf("GetByKey before Del should find record: ok=%v, val=%v", ok, val)
 	}
 
-	// Delete the record
 	cache.Del(userID, txID)
 
-	// GetByKey should return false after deletion
 	val, ok = cache.GetByKey(txID)
 	if ok {
 		t.Errorf("GetByKey after Del should return false, got %d", val)
 	}
 }
 
-func TestUserLFUCacheGetByKeyLFUAccess(t *testing.T) {
+func TestUserCacheGetByKeyAfterUserDel(t *testing.T) {
 	t.Parallel()
-	config := UserLFUCacheConfig{
-		DefaultCachedCount: 5,
-		TotalCapacity:      50, // enough for hot + some cold items
-		ShardCount:         4,
-		SweepInterval:      10 * time.Second,
-		CacheAgeDays:       3,
-	}
-	cache := NewUserLFUCache[string, string, int](config)
-	defer cache.Close()
-
-	userID := "user-hot-cold"
-
-	// Add hot items
-	for i := 0; i < 5; i++ {
-		key := fmt.Sprintf("hot%d", i)
-		cache.Set(userID, key, i*1000, time.Now())
-	}
-
-	// Access hot items frequently BEFORE adding cold items
-	for j := 0; j < 50; j++ {
-		for i := 0; i < 5; i++ {
-			cache.GetByKey(fmt.Sprintf("hot%d", i))
-		}
-	}
-
-	for i := 0; i < 100; i++ {
-		key := fmt.Sprintf("cold%d", i)
-		cache.Set(userID, key, i*100, time.Now())
-	}
-
-	// Hot items should survive due to higher frequency
-	hotFound := 0
-	for i := 0; i < 5; i++ {
-		if _, ok := cache.GetByKey(fmt.Sprintf("hot%d", i)); ok {
-			hotFound++
-		}
-	}
-
-	if hotFound < 2 {
-		t.Errorf("Expected at least 2 hot items to survive via GetByKey, got %d", hotFound)
-	}
-}
-
-func TestUserLFUCacheGetByKeyAfterUserDel(t *testing.T) {
-	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	userID := "user999"
@@ -584,7 +464,6 @@ func TestUserLFUCacheGetByKeyAfterUserDel(t *testing.T) {
 
 	cache.Set(userID, txID, 12345, time.Now())
 
-	// Verify exists before delete
 	val, ok := cache.GetByKey(txID)
 	if !ok || val != 12345 {
 		t.Errorf("GetByKey before DelUser should find record: ok=%v, val=%v", ok, val)
@@ -592,22 +471,20 @@ func TestUserLFUCacheGetByKeyAfterUserDel(t *testing.T) {
 
 	cache.DelUser(userID)
 
-	// GetByKey should return false after user deletion
 	val, ok = cache.GetByKey(txID)
 	if ok {
 		t.Errorf("GetByKey after DelUser should return false, got %d", val)
 	}
 }
 
-func TestUserLFUCacheRange(t *testing.T) {
+func TestUserCacheRange(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	now := time.Now()
 
-	// Add records for multiple users
 	users := []string{"user1", "user2", "user3"}
 	for _, userID := range users {
 		for i := 0; i < 10; i++ {
@@ -615,7 +492,6 @@ func TestUserLFUCacheRange(t *testing.T) {
 		}
 	}
 
-	// Test Range - count all records
 	count := 0
 	cache.Range(func(userID string, key string, value int) bool {
 		count++
@@ -625,7 +501,6 @@ func TestUserLFUCacheRange(t *testing.T) {
 		t.Errorf("Range expected 30 records, got %d", count)
 	}
 
-	// Test Range with early stop
 	count = 0
 	cache.Range(func(userID string, key string, value int) bool {
 		count++
@@ -636,10 +511,10 @@ func TestUserLFUCacheRange(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheRangeRecords(t *testing.T) {
+func TestUserCacheRangeRecords(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	now := time.Now()
@@ -647,7 +522,6 @@ func TestUserLFUCacheRangeRecords(t *testing.T) {
 	cache.Set("user1", "tx1", 100, now)
 	cache.Set("user1", "tx2", 200, now.Add(-time.Hour))
 
-	// Test RangeRecords - verify metadata
 	var records []UserRecord[string, int]
 	cache.RangeRecords(func(userID string, rec UserRecord[string, int]) bool {
 		if userID == "user1" {
@@ -661,15 +535,14 @@ func TestUserLFUCacheRangeRecords(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheRangeUsers(t *testing.T) {
+func TestUserCacheRangeUsers(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	now := time.Now()
 
-	// Add different number of records per user
 	cache.Set("user1", "tx1", 100, now)
 	cache.Set("user1", "tx2", 200, now)
 	cache.Set("user2", "tx1", 100, now)
@@ -677,7 +550,6 @@ func TestUserLFUCacheRangeUsers(t *testing.T) {
 	cache.Set("user3", "tx2", 200, now)
 	cache.Set("user3", "tx3", 300, now)
 
-	// Test RangeUsers
 	userCounts := make(map[string]int)
 	cache.RangeUsers(func(userID string, recordCount int) bool {
 		userCounts[userID] = recordCount
@@ -698,10 +570,10 @@ func TestUserLFUCacheRangeUsers(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheRangeByUser(t *testing.T) {
+func TestUserCacheRangeByUser(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	now := time.Now()
@@ -710,7 +582,6 @@ func TestUserLFUCacheRangeByUser(t *testing.T) {
 	cache.Set("user1", "tx2", 200, now)
 	cache.Set("user2", "tx1", 999, now)
 
-	// Test RangeByUser
 	var keys []string
 	cache.RangeByUser("user1", func(key string, value int) bool {
 		keys = append(keys, key)
@@ -722,16 +593,14 @@ func TestUserLFUCacheRangeByUser(t *testing.T) {
 	}
 }
 
-func TestUserLFUCacheRangeRaceCondition(t *testing.T) {
+func TestUserCacheRangeRaceCondition(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
-	config.TotalCapacity = 10000
-	cache := NewUserLFUCache[int, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[int, string, int](config)
 	defer cache.Close()
 
 	now := time.Now()
 
-	// Add initial data
 	for u := 0; u < 10; u++ {
 		for i := 0; i < 100; i++ {
 			cache.Set(u, fmt.Sprintf("tx%d-%d", u, i), i, now)
@@ -740,7 +609,6 @@ func TestUserLFUCacheRangeRaceCondition(t *testing.T) {
 
 	var wg sync.WaitGroup
 
-	// Concurrent Range reads
 	for g := 0; g < 5; g++ {
 		wg.Add(1)
 		go func() {
@@ -755,7 +623,6 @@ func TestUserLFUCacheRangeRaceCondition(t *testing.T) {
 		}()
 	}
 
-	// Concurrent writes
 	for g := 0; g < 5; g++ {
 		wg.Add(1)
 		go func(gid int) {
@@ -766,7 +633,6 @@ func TestUserLFUCacheRangeRaceCondition(t *testing.T) {
 		}(g)
 	}
 
-	// Concurrent deletes
 	for g := 0; g < 3; g++ {
 		wg.Add(1)
 		go func(gid int) {
@@ -780,10 +646,10 @@ func TestUserLFUCacheRangeRaceCondition(t *testing.T) {
 	wg.Wait()
 }
 
-func TestUserLFUCacheLen(t *testing.T) {
+func TestUserCacheLen(t *testing.T) {
 	t.Parallel()
-	config := DefaultUserLFUConfig()
-	cache := NewUserLFUCache[string, string, int](config)
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
 	defer cache.Close()
 
 	now := time.Now()
@@ -792,7 +658,6 @@ func TestUserLFUCacheLen(t *testing.T) {
 		t.Errorf("Empty cache Len expected 0, got %d", cache.Len())
 	}
 
-	// Add records
 	for i := 0; i < 100; i++ {
 		cache.Set("user1", fmt.Sprintf("tx%d", i), i, now)
 	}
@@ -801,7 +666,6 @@ func TestUserLFUCacheLen(t *testing.T) {
 		t.Errorf("After adding 100, Len expected 100, got %d", cache.Len())
 	}
 
-	// Delete some
 	for i := 0; i < 30; i++ {
 		cache.Del("user1", fmt.Sprintf("tx%d", i))
 	}
@@ -810,9 +674,228 @@ func TestUserLFUCacheLen(t *testing.T) {
 		t.Errorf("After deleting 30, Len expected 70, got %d", cache.Len())
 	}
 
-	// Clear
 	cache.Clear()
 	if cache.Len() != 0 {
 		t.Errorf("After Clear, Len expected 0, got %d", cache.Len())
+	}
+}
+
+func TestUserCacheLoadMore(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
+	defer cache.Close()
+
+	userID := "user1"
+	baseTime := time.Now()
+
+	// Initial set of records
+	for i := 0; i < 5; i++ {
+		cache.Set(userID, fmt.Sprintf("init%d", i), i, baseTime.Add(-time.Duration(i)*time.Minute))
+	}
+
+	// LoadMore — first batch
+	batch1 := make([]struct {
+		Key       string
+		Value     int
+		CreatedAt time.Time
+		Cost      int64
+	}, 10)
+	for i := 0; i < 10; i++ {
+		batch1[i] = struct {
+			Key       string
+			Value     int
+			CreatedAt time.Time
+			Cost      int64
+		}{
+			Key:       fmt.Sprintf("batch1-%d", i),
+			Value:     i * 10,
+			CreatedAt: baseTime.Add(-time.Duration(i+10) * time.Minute),
+			Cost:      1,
+		}
+	}
+
+	loaded := cache.LoadMore(userID, batch1)
+	if loaded != 10 {
+		t.Errorf("Expected 10 loaded, got %d", loaded)
+	}
+
+	if cache.GetLoadedCount(userID) != 10 {
+		t.Errorf("Expected loaded count 10, got %d", cache.GetLoadedCount(userID))
+	}
+
+	if cache.GetUserRecordCount(userID) != 15 {
+		t.Errorf("Expected 15 total records, got %d", cache.GetUserRecordCount(userID))
+	}
+
+	// LoadMore — second batch
+	batch2 := make([]struct {
+		Key       string
+		Value     int
+		CreatedAt time.Time
+		Cost      int64
+	}, 5)
+	for i := 0; i < 5; i++ {
+		batch2[i] = struct {
+			Key       string
+			Value     int
+			CreatedAt time.Time
+			Cost      int64
+		}{
+			Key:       fmt.Sprintf("batch2-%d", i),
+			Value:     i * 100,
+			CreatedAt: baseTime.Add(-time.Duration(i+20) * time.Minute),
+			Cost:      1,
+		}
+	}
+
+	loaded = cache.LoadMore(userID, batch2)
+	if loaded != 5 {
+		t.Errorf("Expected 5 loaded, got %d", loaded)
+	}
+
+	if cache.GetLoadedCount(userID) != 15 {
+		t.Errorf("Expected loaded count 15 after two batches, got %d", cache.GetLoadedCount(userID))
+	}
+
+	if cache.GetUserRecordCount(userID) != 20 {
+		t.Errorf("Expected 20 total records, got %d", cache.GetUserRecordCount(userID))
+	}
+}
+
+func TestUserCachePagination(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
+	defer cache.Close()
+
+	userID := "user1"
+	baseTime := time.Now()
+
+	// Add 20 records with distinct timestamps
+	for i := 0; i < 20; i++ {
+		cache.Set(userID, fmt.Sprintf("tx%d", i), i, baseTime.Add(-time.Duration(i)*time.Hour))
+	}
+
+	// Page 0: first 5 records (newest)
+	page0 := cache.GetPage(userID, 0, 5)
+	if len(page0) != 5 {
+		t.Fatalf("Page 0: expected 5, got %d", len(page0))
+	}
+	for i, rec := range page0 {
+		expected := fmt.Sprintf("tx%d", i)
+		if rec.Key != expected {
+			t.Errorf("Page 0[%d]: expected %s, got %s", i, expected, rec.Key)
+		}
+	}
+
+	// Page 1: records 5-9
+	page1 := cache.GetPage(userID, 5, 5)
+	if len(page1) != 5 {
+		t.Fatalf("Page 1: expected 5, got %d", len(page1))
+	}
+	for i, rec := range page1 {
+		expected := fmt.Sprintf("tx%d", i+5)
+		if rec.Key != expected {
+			t.Errorf("Page 1[%d]: expected %s, got %s", i, expected, rec.Key)
+		}
+	}
+
+	// Page beyond data
+	pageBeyond := cache.GetPage(userID, 20, 5)
+	if len(pageBeyond) != 0 {
+		t.Errorf("Page beyond: expected 0, got %d", len(pageBeyond))
+	}
+
+	// Partial last page
+	pageLast := cache.GetPage(userID, 18, 5)
+	if len(pageLast) != 2 {
+		t.Errorf("Last page: expected 2, got %d", len(pageLast))
+	}
+}
+
+func TestUserCacheLoadCursor(t *testing.T) {
+	config := DefaultUserCacheConfig()
+	cache := NewUserCache[string, string, int](config)
+	defer cache.Close()
+
+	userID := "user1"
+
+	// Initially not fully loaded, loaded count is 0
+	if cache.IsFullyLoaded(userID) {
+		t.Error("New user should not be fully loaded")
+	}
+	if cache.GetLoadedCount(userID) != 0 {
+		t.Errorf("New user loaded count should be 0, got %d", cache.GetLoadedCount(userID))
+	}
+
+	// Need to create the user first
+	cache.Set(userID, "init", 0, time.Now())
+
+	// Still not fully loaded
+	if cache.IsFullyLoaded(userID) {
+		t.Error("User should not be fully loaded after Set")
+	}
+
+	// Mark as fully loaded
+	cache.SetFullyLoaded(userID, true)
+	if !cache.IsFullyLoaded(userID) {
+		t.Error("User should be fully loaded after SetFullyLoaded(true)")
+	}
+
+	// Unmark
+	cache.SetFullyLoaded(userID, false)
+	if cache.IsFullyLoaded(userID) {
+		t.Error("User should not be fully loaded after SetFullyLoaded(false)")
+	}
+}
+
+func TestUserCacheSweepResetsFullyLoaded(t *testing.T) {
+	config := UserCacheConfig{
+		DefaultCachedCount: 5,
+		SweepInterval:      time.Hour,
+		CacheAgeDays:       1,
+		ShardCount:         16,
+	}
+	cache := NewUserCache[string, string, int](config)
+	defer cache.Close()
+
+	userID := "user1"
+	now := time.Now()
+
+	shard := cache.getShard(userID)
+	records, _ := shard.users.LoadOrCompute(userID, func() (*userRecordSet[string, int], bool) {
+		return newUserRecordSet[string, int](), false
+	})
+
+	// Add 10 records with old cached timestamps
+	for i := 0; i < 10; i++ {
+		item := &userCacheItem[string, int]{
+			key:       fmt.Sprintf("tx%d", i),
+			value:     i,
+			createdAt: now.Add(-time.Duration(i) * time.Hour).UnixMilli(),
+			cached:    now.Add(-48 * time.Hour).UnixMilli(),
+			cost:      1,
+			seq:       itemSeq.Add(1),
+		}
+		records.insert(item)
+		shard.keyIndex.Store(item.key, userID)
+		shard.globalKeyIdx.Store(item.key, globalKeyEntry{shardIdx: shard.shardIdx})
+		shard.validSize.Add(1)
+	}
+
+	// Mark as fully loaded
+	cache.SetFullyLoaded(userID, true)
+	if !cache.IsFullyLoaded(userID) {
+		t.Fatal("Should be fully loaded before sweep")
+	}
+
+	cache.ForceSweep()
+
+	// After sweep, should no longer be fully loaded (trimmed to DefaultCachedCount)
+	if cache.IsFullyLoaded(userID) {
+		t.Error("Should not be fully loaded after sweep trimmed records")
+	}
+
+	if count := cache.GetUserRecordCount(userID); count != 5 {
+		t.Errorf("Expected 5 records after sweep, got %d", count)
 	}
 }
