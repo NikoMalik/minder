@@ -1,4 +1,4 @@
-package minder
+package lfu
 
 import (
 	"math/rand/v2"
@@ -31,7 +31,7 @@ func newCmSketch(numCounters int64) *cmSketch {
 		panic("cmSketch: bad numCounters")
 	}
 	// Get the next power of 2 for better cache performance.
-	numCounters = next2Power(numCounters)
+	numCounters = Next2Power(numCounters)
 	sketch := &cmSketch{mask: uint64(numCounters - 1)}
 	// Initialize rows of counters and seeds.
 	source := rand.New(timeSource{})
@@ -147,8 +147,8 @@ func (r cmRow) clear() {
 	}
 }
 
-// next2Power rounds x up to the next power of 2, if it's not already one.
-func next2Power(x int64) int64 {
+// Next2Power rounds x up to the next power of 2, if it's not already one.
+func Next2Power(x int64) int64 {
 	x--
 	x |= x >> 1
 	x |= x >> 2

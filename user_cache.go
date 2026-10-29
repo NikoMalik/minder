@@ -1,6 +1,7 @@
 package minder
 
 import (
+	"github.com/NikoMalik/minder/internal/lfu"
 	"hash/maphash"
 	"sync"
 	"sync/atomic"
@@ -143,12 +144,7 @@ func (rs *userRecordSet[K, V]) getPage(offset, limit int) []*userCacheItem[K, V]
 	}
 
 	result := make([]*userCacheItem[K, V], 0, limit)
-	skipped := 0
-	rs.tree.Scan(func(item *userCacheItem[K, V]) bool {
-		if skipped < offset {
-			skipped++
-			return true
-		}
+	rs.scanFromIndex(max(offset, 0), func(item *userCacheItem[K, V]) bool {
 		result = append(result, item)
 		return len(result) < limit
 	})
@@ -168,21 +164,17 @@ func (rs *userRecordSet[K, V]) getAll() []*userCacheItem[K, V] {
 
 func (rs *userRecordSet[K, V]) clear() {
 	rs.records = xsync.NewMap[K, *userCacheItem[K, V]]()
-	rs.tree = btree.NewBTreeGOptions(userCacheItemLess[K, V], btree.Options{Degree: 64})
+	rs.tree = btree.NewBTreeGOptions(userCacheItemLess[K, V], btree.Options{Degree: 128})
 }
 
 // scanFromIndex scans tree items starting at index `start`, calling fn for each.
 // Returns under RLock. Used by sweep.
 func (rs *userRecordSet[K, V]) scanFromIndex(start int, fn func(item *userCacheItem[K, V]) bool) {
-	idx := 0
-	rs.tree.Scan(func(item *userCacheItem[K, V]) bool {
-		if idx < start {
-			idx++
-			return true
-		}
-		idx++
-		return fn(item)
-	})
+	pivot, ok := rs.tree.GetAt(start)
+	if !ok {
+		return
+	}
+	rs.tree.Ascend(pivot, fn)
 }
 
 // userCacheShard is a single shard.
@@ -198,6 +190,8 @@ type userCacheShard[U comparable, K comparable, V any] struct {
 }
 
 // UserCache is a cache with per-user record limits (no LFU eviction).
+//
+// Deprecated: use cache.NewUserCache from github.com/NikoMalik/minder/cache
 type UserCache[U comparable, K comparable, V any] struct {
 	shards       []*userCacheShard[U, K, V]
 	globalKeyIdx *xsync.Map[K, globalKeyEntry]
@@ -213,7 +207,7 @@ func NewUserCache[U comparable, K comparable, V any](config UserCacheConfig) *Us
 	if config.ShardCount <= 0 {
 		config.ShardCount = 256
 	}
-	config.ShardCount = int(next2Power(int64(config.ShardCount)))
+	config.ShardCount = int(lfu.Next2Power(int64(config.ShardCount)))
 
 	cache := &UserCache[U, K, V]{
 		shards:       make([]*userCacheShard[U, K, V], config.ShardCount),
@@ -290,6 +284,8 @@ func (c *UserCache[U, K, V]) SetWithCost(userID U, key K, value V, createdAt tim
 }
 
 func (s *userCacheShard[U, K, V]) set(userID U, key K, value V, createdAt time.Time, cost int64) {
+	s.Lock()
+	defer s.Unlock()
 	now := time.Now().UnixMilli()
 	item := &userCacheItem[K, V]{
 		key:       key,
@@ -348,6 +344,8 @@ func (c *UserCache[U, K, V]) GetNewest(userID U, count int) []UserRecord[K, V] {
 }
 
 func (s *userCacheShard[U, K, V]) getNewest(userID U, count int) []UserRecord[K, V] {
+	s.RLock()
+	defer s.RUnlock()
 	records, ok := s.users.Load(userID)
 	if !ok {
 		return nil
@@ -373,6 +371,8 @@ func (c *UserCache[U, K, V]) GetPage(userID U, offset, limit int) []UserRecord[K
 }
 
 func (s *userCacheShard[U, K, V]) getPage(userID U, offset, limit int) []UserRecord[K, V] {
+	s.RLock()
+	defer s.RUnlock()
 	records, ok := s.users.Load(userID)
 	if !ok {
 		return nil
@@ -398,6 +398,8 @@ func (c *UserCache[U, K, V]) GetAllSorted(userID U) []UserRecord[K, V] {
 }
 
 func (s *userCacheShard[U, K, V]) getAllSorted(userID U) []UserRecord[K, V] {
+	s.RLock()
+	defer s.RUnlock()
 	records, ok := s.users.Load(userID)
 	if !ok {
 		return nil
@@ -444,6 +446,8 @@ func (s *userCacheShard[U, K, V]) loadMore(userID U, items []struct {
 	CreatedAt time.Time
 	Cost      int64
 }) int {
+	s.Lock()
+	defer s.Unlock()
 	now := time.Now().UnixMilli()
 
 	records, _ := s.users.LoadOrCompute(userID, func() (*userRecordSet[K, V], bool) {
@@ -529,6 +533,8 @@ func (s *userCacheShard[U, K, V]) loadUserRecords(userID U, items []struct {
 	CreatedAt time.Time
 	Cost      int64
 }) int {
+	s.Lock()
+	defer s.Unlock()
 	now := time.Now().UnixMilli()
 
 	records, _ := s.users.LoadOrCompute(userID, func() (*userRecordSet[K, V], bool) {
@@ -582,6 +588,8 @@ func (s *userCacheShard[U, K, V]) replaceUserRecords(userID U, items []struct {
 	CreatedAt time.Time
 	Cost      int64
 }) {
+	s.Lock()
+	defer s.Unlock()
 	now := time.Now().UnixMilli()
 
 	records, _ := s.users.LoadOrCompute(userID, func() (*userRecordSet[K, V], bool) {
@@ -631,6 +639,8 @@ func (c *UserCache[U, K, V]) Del(userID U, key K) {
 }
 
 func (s *userCacheShard[U, K, V]) del(userID U, key K) {
+	s.Lock()
+	defer s.Unlock()
 	records, ok := s.users.Load(userID)
 	if !ok {
 		return
@@ -650,6 +660,8 @@ func (c *UserCache[U, K, V]) DelUser(userID U) {
 }
 
 func (s *userCacheShard[U, K, V]) delUser(userID U) {
+	s.Lock()
+	defer s.Unlock()
 	records, ok := s.users.LoadAndDelete(userID)
 	if !ok {
 		return
@@ -689,7 +701,15 @@ func (c *UserCache[U, K, V]) sweep() {
 	}
 }
 
+func (s *userCacheShard[U, K, V]) snapshot(records *userRecordSet[K, V]) []*userCacheItem[K, V] {
+	s.RLock()
+	defer s.RUnlock()
+	return records.getAll()
+}
+
 func (s *userCacheShard[U, K, V]) sweep(cutoffTime int64, defaultCount int) {
+	s.Lock()
+	defer s.Unlock()
 	s.users.Range(func(userID U, records *userRecordSet[K, V]) bool {
 		count := records.count()
 		if count <= defaultCount {
@@ -750,6 +770,7 @@ func (c *UserCache[U, K, V]) UserCount() int {
 func (c *UserCache[U, K, V]) Clear() {
 	c.globalKeyIdx.Clear()
 	for _, shard := range c.shards {
+		shard.Lock()
 		shard.users.Range(func(u U, records *userRecordSet[K, V]) bool {
 			records.clear()
 			return true
@@ -757,6 +778,7 @@ func (c *UserCache[U, K, V]) Clear() {
 		shard.users.Clear()
 		shard.keyIndex.Clear()
 		shard.validSize.Store(0)
+		shard.Unlock()
 	}
 }
 
@@ -782,7 +804,7 @@ func (c *UserCache[U, K, V]) Range(f func(userID U, key K, value V) bool) {
 	for _, shard := range c.shards {
 		stop := false
 		shard.users.Range(func(userID U, records *userRecordSet[K, V]) bool {
-			for _, item := range records.getAll() {
+			for _, item := range shard.snapshot(records) {
 				if !f(userID, item.key, item.value) {
 					stop = true
 					return false
@@ -803,7 +825,7 @@ func (c *UserCache[U, K, V]) RangeRecords(f func(userID U, record UserRecord[K, 
 	for _, shard := range c.shards {
 		stop := false
 		shard.users.Range(func(userID U, records *userRecordSet[K, V]) bool {
-			for _, item := range records.getAll() {
+			for _, item := range shard.snapshot(records) {
 				rec := UserRecord[K, V]{
 					Key:       item.key,
 					Value:     item.value,
@@ -850,7 +872,7 @@ func (c *UserCache[U, K, V]) RangeByUser(userID U, f func(key K, value V) bool) 
 	if !ok {
 		return
 	}
-	for _, item := range records.getAll() {
+	for _, item := range shard.snapshot(records) {
 		if !f(item.key, item.value) {
 			return
 		}

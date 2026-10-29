@@ -1,6 +1,7 @@
 package minder
 
 import (
+	"github.com/NikoMalik/minder/internal/lfu"
 	"hash/maphash"
 	"math/bits"
 	"sync"
@@ -29,13 +30,15 @@ type lfuCacheItem[V any] struct {
 type lfuShard[K comparable, V any] struct {
 	sync.RWMutex
 	store       *xsync.Map[K, *lfuCacheItem[V]]
-	policy      *lfuPolicy[K, V]
+	policy      *lfu.Policy[K, V]
 	hashSeed    maphash.Seed
 	validSize   atomic.Int64
 	stopCleanup chan struct{}
 }
 
 // ShardedLFUCache is a sharded cache with TinyLFU-based eviction.
+//
+// Deprecated: use cache.New with cache.ModeTTL | cache.ModeLFU from github.com/NikoMalik/minder/cache
 type ShardedLFUCache[K comparable, V any] struct {
 	shards      [LFU_SHARD_COUNT]*lfuShard[K, V]
 	hashSeed    maphash.Seed
@@ -59,7 +62,7 @@ func NewShardedLFUCacheWithSize[K comparable, V any](totalSize int64) *ShardedLF
 	for i := 0; i < LFU_SHARD_COUNT; i++ {
 		sc.shards[i] = &lfuShard[K, V]{
 			store:       xsync.NewMap[K, *lfuCacheItem[V]](xsync.WithPresize(int(perShard)), xsync.WithGrowOnly()),
-			policy:      newLFUPolicy[K, V](numCounters, perShard),
+			policy:      lfu.NewPolicy[K, V](numCounters, perShard),
 			hashSeed:    sc.hashSeed,
 			stopCleanup: make(chan struct{}),
 		}

@@ -13,6 +13,7 @@ type cacheItem[V any] struct {
 	expiration int64
 }
 
+// Deprecated: use cache.New with cache.ModeTTL from github.com/NikoMalik/minder/cache
 type Cache[K comparable, V any] struct {
 	store       *xsync.Map[K, *cacheItem[V]]
 	stopCleanup chan struct{}

@@ -899,3 +899,53 @@ func TestUserCacheSweepResetsFullyLoaded(t *testing.T) {
 		t.Errorf("Expected 5 records after sweep, got %d", count)
 	}
 }
+
+func TestUserCacheSameKeyConcurrent(t *testing.T) {
+	cache := NewUserCache[string, string, int](DefaultUserCacheConfig())
+	defer cache.Close()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 1000; i++ {
+				cache.Set("u", "k", i, time.Now())
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := cache.GetUserRecordCount("u"); n != 1 {
+		t.Fatalf("expected 1 record, got %d", n)
+	}
+	if n := len(cache.GetAllSorted("u")); n != 1 {
+		t.Fatalf("expected 1 record in sorted view, got %d", n)
+	}
+	if n := cache.Len(); n != 1 {
+		t.Fatalf("expected Len 1, got %d", n)
+	}
+}
+
+func TestUserCachePageOffset(t *testing.T) {
+	cache := NewUserCache[string, int, int](DefaultUserCacheConfig())
+	defer cache.Close()
+
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		cache.Set("u", i, i, now.Add(-time.Duration(i)*time.Second))
+	}
+
+	page := cache.GetPage("u", 990, 20)
+	if len(page) != 10 {
+		t.Fatalf("expected 10 records, got %d", len(page))
+	}
+	for i, r := range page {
+		if r.Key != 990+i {
+			t.Fatalf("page[%d]: expected key %d, got %d", i, 990+i, r.Key)
+		}
+	}
+	if got := cache.GetPage("u", 1000, 5); len(got) != 0 {
+		t.Fatalf("expected empty page past the end, got %d", len(got))
+	}
+}

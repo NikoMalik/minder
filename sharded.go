@@ -13,6 +13,7 @@ const SHARD_MASK = SHARD_COUNT - 1
 
 const TOTAL = 1024_000
 
+// Deprecated: use cache.New with cache.ModeTTL from github.com/NikoMalik/minder/cache
 type ShardedCache[K comparable, V any] struct {
 	shards      [SHARD_COUNT]*Cache[K, V]
 	hashSeed    maphash.Seed
