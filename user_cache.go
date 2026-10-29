@@ -15,6 +15,8 @@ import (
 // Avoids fmt.Sprint allocations in the comparator.
 var itemSeq atomic.Uint64
 
+const userSweepBatch = 1024
+
 // UserCacheConfig is the configuration for UserCache.
 type UserCacheConfig struct {
 	// DefaultCachedCount - per-user cap for cached items.
@@ -708,24 +710,31 @@ func (s *userCacheShard[U, K, V]) snapshot(records *userRecordSet[K, V]) []*user
 }
 
 func (s *userCacheShard[U, K, V]) sweep(cutoffTime int64, defaultCount int) {
-	s.Lock()
-	defer s.Unlock()
 	s.users.Range(func(userID U, records *userRecordSet[K, V]) bool {
-		count := records.count()
-		if count <= defaultCount {
-			return true
+		s.sweepUser(userID, records, cutoffTime, defaultCount)
+		return true
+	})
+}
+
+func (s *userCacheShard[U, K, V]) sweepUser(userID U, records *userRecordSet[K, V], cutoffTime int64, defaultCount int) {
+	pos := defaultCount
+	for {
+		s.Lock()
+		if cur, ok := s.users.Load(userID); !ok || cur != records || records.count() <= defaultCount {
+			s.Unlock()
+			return
 		}
 
-		// Collect keys to delete: items beyond defaultCount with old cached time
+		scanned := 0
 		toDelete := make([]K, 0)
-		records.scanFromIndex(defaultCount, func(item *userCacheItem[K, V]) bool {
+		records.scanFromIndex(pos, func(item *userCacheItem[K, V]) bool {
+			scanned++
 			if item.cached < cutoffTime {
 				toDelete = append(toDelete, item.key)
 			}
-			return true
+			return scanned < userSweepBatch
 		})
 
-		// Delete outside of lock
 		deleted := 0
 		for _, key := range toDelete {
 			if _, ok := records.delete(key); ok {
@@ -736,13 +745,16 @@ func (s *userCacheShard[U, K, V]) sweep(cutoffTime int64, defaultCount int) {
 		}
 		s.validSize.Add(-int64(deleted))
 
-		// Reset fullyLoaded if trimmed to default count
-		if records.count() <= defaultCount {
+		if deleted > 0 && records.count() <= defaultCount {
 			records.cursor.fullyLoaded.Store(false)
 		}
+		s.Unlock()
 
-		return true
-	})
+		if scanned < userSweepBatch {
+			return
+		}
+		pos += scanned - deleted
+	}
 }
 
 // Len returns total number of cached records.

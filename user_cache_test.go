@@ -949,3 +949,55 @@ func TestUserCachePageOffset(t *testing.T) {
 		t.Fatalf("expected empty page past the end, got %d", len(got))
 	}
 }
+
+func TestUserCacheSweepBatches(t *testing.T) {
+	config := UserCacheConfig{DefaultCachedCount: 5, SweepInterval: time.Hour, CacheAgeDays: 1, ShardCount: 16}
+	cache := NewUserCache[string, string, int](config)
+	defer cache.Close()
+
+	now := time.Now()
+	const total = 3*userSweepBatch + 7
+	shard := cache.getShard("u")
+	records, _ := shard.users.LoadOrCompute("u", func() (*userRecordSet[string, int], bool) {
+		return newUserRecordSet[string, int](), false
+	})
+	for i := 0; i < total; i++ {
+		cached := now.Add(-48 * time.Hour)
+		if i%10 == 0 {
+			cached = now
+		}
+		item := &userCacheItem[string, int]{
+			key:       fmt.Sprintf("tx%d", i),
+			value:     i,
+			createdAt: now.Add(-time.Duration(i) * time.Second).UnixMilli(),
+			cached:    cached.UnixMilli(),
+			cost:      1,
+			seq:       itemSeq.Add(1),
+		}
+		records.insert(item)
+		shard.keyIndex.Store(item.key, "u")
+		shard.globalKeyIdx.Store(item.key, globalKeyEntry{shardIdx: shard.shardIdx})
+		shard.validSize.Add(1)
+	}
+
+	cache.ForceSweep()
+
+	want := 5
+	for i := 5; i < total; i++ {
+		if i%10 == 0 {
+			want++
+		}
+	}
+	if n := cache.GetUserRecordCount("u"); n != want {
+		t.Fatalf("expected %d records after sweep, got %d", want, n)
+	}
+	if cache.Len() != want {
+		t.Fatalf("expected Len %d, got %d", want, cache.Len())
+	}
+	for i := 0; i < total; i++ {
+		_, ok := cache.Get("u", fmt.Sprintf("tx%d", i))
+		if keepIt := i < 5 || i%10 == 0; ok != keepIt {
+			t.Fatalf("record %d: present=%v, want %v", i, ok, keepIt)
+		}
+	}
+}

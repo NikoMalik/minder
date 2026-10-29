@@ -11,7 +11,10 @@ import (
 	"github.com/tidwall/btree"
 )
 
-const userTreeDegree = 128
+const (
+	userTreeDegree = 128
+	sweepBatch     = 1024
+)
 
 var itemSeq atomic.Uint64
 
@@ -74,6 +77,7 @@ type userSet[K comparable, V any] struct {
 	mu          sync.RWMutex
 	items       map[K]*userItem[K, V]
 	tree        *btree.BTreeG[*userItem[K, V]]
+	hint        btree.PathHint
 	loaded      int64
 	fullyLoaded bool
 	dead        bool
@@ -176,7 +180,7 @@ func (c *UserCache[U, K, V]) insertLocked(userID U, s *userSet[K, V], it *userIt
 		c.size.Add(1)
 	}
 	s.items[it.key] = it
-	s.tree.Set(it)
+	s.tree.SetHint(it, &s.hint)
 	c.owners.Store(it.key, userID)
 }
 
@@ -412,26 +416,41 @@ func (c *UserCache[U, K, V]) sweep() {
 
 	for _, users := range c.shards {
 		users.Range(func(userID U, s *userSet[K, V]) bool {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if len(s.items) <= keep {
-				return true
-			}
-			var old []K
-			s.from(keep, func(it *userItem[K, V]) bool {
-				if it.cached < cutoff {
-					old = append(old, it.key)
-				}
-				return true
-			})
-			for _, key := range old {
-				c.deleteLocked(userID, s, key)
-			}
-			if len(s.items) <= keep {
-				s.fullyLoaded = false
-			}
+			c.sweepUser(userID, s, cutoff, keep)
 			return true
 		})
+	}
+}
+
+func (c *UserCache[U, K, V]) sweepUser(userID U, s *userSet[K, V], cutoff int64, keep int) {
+	pos := keep
+	for {
+		s.mu.Lock()
+		if s.dead || len(s.items) <= keep {
+			s.mu.Unlock()
+			return
+		}
+		scanned := 0
+		var old []K
+		s.from(pos, func(it *userItem[K, V]) bool {
+			scanned++
+			if it.cached < cutoff {
+				old = append(old, it.key)
+			}
+			return scanned < sweepBatch
+		})
+		for _, key := range old {
+			c.deleteLocked(userID, s, key)
+		}
+		if len(old) > 0 && len(s.items) <= keep {
+			s.fullyLoaded = false
+		}
+		s.mu.Unlock()
+
+		if scanned < sweepBatch {
+			return
+		}
+		pos += scanned - len(old)
 	}
 }
 

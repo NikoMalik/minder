@@ -944,3 +944,42 @@ func TestUserCacheDelUserVsSet(t *testing.T) {
 		t.Fatalf("Len %d does not match user count %d", got, want)
 	}
 }
+
+func TestUserCacheSweepBatches(t *testing.T) {
+	config := UserCacheConfig{DefaultCachedCount: 5, SweepInterval: time.Hour, CacheAgeDays: 1, ShardCount: 16}
+	cache := NewUserCache[string, int, int](config)
+	defer cache.Close()
+
+	now := time.Now()
+	const total = 3*sweepBatch + 7
+	cache.write("u", func(s *userSet[int, int]) {
+		for i := 0; i < total; i++ {
+			cached := now.Add(-48 * time.Hour)
+			if i%10 == 0 {
+				cached = now
+			}
+			cache.insertLocked("u", s, newUserItem(i, i, now.Add(-time.Duration(i)*time.Second), 1, cached.UnixMilli()))
+		}
+	})
+
+	cache.ForceSweep()
+
+	want := 5
+	for i := 5; i < total; i++ {
+		if i%10 == 0 {
+			want++
+		}
+	}
+	if n := cache.GetUserRecordCount("u"); n != want {
+		t.Fatalf("expected %d records after sweep, got %d", want, n)
+	}
+	if cache.Len() != want {
+		t.Fatalf("expected Len %d, got %d", want, cache.Len())
+	}
+	for i := 0; i < total; i++ {
+		_, ok := cache.Get("u", i)
+		if keepIt := i < 5 || i%10 == 0; ok != keepIt {
+			t.Fatalf("record %d: present=%v, want %v", i, ok, keepIt)
+		}
+	}
+}

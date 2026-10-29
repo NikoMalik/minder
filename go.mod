@@ -6,7 +6,7 @@ require (
 	github.com/NikoMalik/bloom v0.0.0-20261029130110-76c5027c8abb
 	github.com/puzpuzpuz/xsync/v4 v4.1.0
 	github.com/stretchr/testify v1.10.0
-	github.com/tidwall/btree v1.8.1
+	github.com/tidwall/btree v1.8.2
 	golang.org/x/sync v0.17.0
 )
 
